@@ -52,3 +52,15 @@ export async function createDriver(
 }
 
 export const as = (actor: Actor) => ({ Authorization: `Bearer ${actor.token}` });
+
+// --- thin wrappers over the HTTP API so tests read like the Banani story ---
+export const goOnline = (d: Actor) => request(app).post('/api/driver/status').set(as(d)).send({ online: true });
+export const goOffline = (d: Actor) => request(app).post('/api/driver/status').set(as(d)).send({ online: false });
+export const requestRide = (p: Actor, body: object) => request(app).post('/api/rides').set(as(p)).send(body);
+export const getRide = (p: Actor, id: string) => request(app).get(`/api/rides/${id}`).set(as(p));
+export const cancelRide = (p: Actor, id: string) => request(app).post(`/api/rides/${id}/cancel`).set(as(p));
+export const acceptRide = (d: Actor, id: string) => request(app).post(`/api/driver/requests/${id}/accept`).set(as(d));
+export const driverPool = (d: Actor) => request(app).get('/api/driver/pool').set(as(d));
+
+export const BANANI_TO_MOHAKHALI = { pickupZone: 'BANANI', destinationZone: 'MOHAKHALI' };
+export const BANANI_TO_GULSHAN = { pickupZone: 'BANANI', destinationZone: 'GULSHAN_1' };
