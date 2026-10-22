@@ -2,12 +2,14 @@ import { createApp } from './app';
 import { config } from './config';
 import { closePool } from './db/pool';
 import { runMigrations } from './db/migrate';
+import { runSeed } from './db/seed';
 import { logger } from './logger';
 
 async function main() {
   // Applying pending migrations on boot keeps `docker compose up` a one-command start.
   // The migration runner holds a Postgres advisory lock, so several replicas are safe.
   await runMigrations();
+  if (config.SEED_ON_START) await runSeed();
 
   const server = createApp().listen(config.PORT, () => {
     logger.info({ port: config.PORT }, 'api listening');
