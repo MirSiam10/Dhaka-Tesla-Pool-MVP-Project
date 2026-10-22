@@ -64,3 +64,10 @@ export const driverPool = (d: Actor) => request(app).get('/api/driver/pool').set
 
 export const BANANI_TO_MOHAKHALI = { pickupZone: 'BANANI', destinationZone: 'MOHAKHALI' };
 export const BANANI_TO_GULSHAN = { pickupZone: 'BANANI', destinationZone: 'GULSHAN_1' };
+
+export const arrive = (d: Actor) => request(app).post('/api/driver/pool/arrive').set(as(d));
+export const startTrip = (d: Actor) => request(app).post('/api/driver/pool/start').set(as(d));
+export const complete = (d: Actor, rideId: string) => request(app).post(`/api/driver/pool/rides/${rideId}/complete`).set(as(d));
+export const cancelPool = (d: Actor) => request(app).post('/api/driver/pool/cancel').set(as(d));
+export const driverHistory = (d: Actor) => request(app).get('/api/driver/history').set(as(d));
+export const rideEvents = (p: Actor, id: string) => request(app).get(`/api/rides/${id}/events`).set(as(p));
