@@ -32,3 +32,24 @@ driverRouter.post('/requests/:id/accept', async (req, res) => {
 driverRouter.get('/pool', async (req, res) => {
   res.json({ pool: await driver.getActivePoolView(pool, currentUser(req).id) });
 });
+
+driverRouter.post('/pool/arrive', async (req, res) => {
+  res.json({ pool: await driver.markArrived(currentUser(req).id) });
+});
+
+driverRouter.post('/pool/start', async (req, res) => {
+  res.json({ pool: await driver.startTrip(currentUser(req).id) });
+});
+
+driverRouter.post('/pool/rides/:id/complete', async (req, res) => {
+  const { id } = idParam.parse(req.params);
+  res.json({ pool: await driver.completePassenger(currentUser(req).id, id) });
+});
+
+driverRouter.post('/pool/cancel', async (req, res) => {
+  res.json(await driver.cancelPool(currentUser(req).id));
+});
+
+driverRouter.get('/history', async (req, res) => {
+  res.json(await driver.history(currentUser(req).id));
+});

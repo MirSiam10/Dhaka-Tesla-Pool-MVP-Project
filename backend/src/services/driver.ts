@@ -1,6 +1,7 @@
 import { type Db, pool as dbPool, query, withTransaction } from '../db/pool';
 import { conflict, notFound } from '../errors';
-import { lockPool, lockRide, tryJoinPool, type JoinVerdict } from '../pooling/poolService';
+import { assertPoolTransition, assertRideTransition, type RideStatus } from '../pooling/lifecycle';
+import { leavePool, lockPool, lockRide, tryJoinPool, type JoinVerdict, type PoolRow } from '../pooling/poolService';
 import { canJoinPool } from '../pooling/matching';
 import { recordEvent } from './events';
 
@@ -242,4 +243,142 @@ export async function getActivePoolView(db: Db, driverId: string): Promise<PoolV
   const v = await getVehicle(db, driverId);
   const { rows } = await db.query(`SELECT id FROM pools WHERE vehicle_id = $1 AND status IN ${ACTIVE_POOL}`, [v.id]);
   return rows[0] ? getPoolView(db, rows[0].id) : null;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Trip lifecycle. Arrive and start act on the whole pool; completion is per passenger because
+// Nusrat gets off at Mohakhali while Rafiq rides on to Gulshan 1.
+// ---------------------------------------------------------------------------------------------
+
+/** Locks the driver's live pool (vehicle -> pool) or explains why there is none. */
+async function lockActivePool(db: Db, driverId: string): Promise<PoolRow> {
+  const vehicle = await getVehicle(db, driverId, true);
+  const { rows } = await db.query(`SELECT id FROM pools WHERE vehicle_id = $1 AND status IN ${ACTIVE_POOL}`, [vehicle.id]);
+  if (!rows[0]) throw conflict('NO_ACTIVE_POOL', 'You have no active pool. Accept a request first.');
+  return lockPool(db, rows[0].id);
+}
+
+/** Locks every ride in the pool in a fixed order (by id) so concurrent actors cannot deadlock. */
+async function lockPoolRides(db: Db, poolId: string, statuses: RideStatus[]) {
+  const { rows } = await db.query(
+    `SELECT id, status, passenger_id FROM ride_requests
+      WHERE pool_id = $1 AND status = ANY($2::text[]) ORDER BY id FOR UPDATE`,
+    [poolId, statuses],
+  );
+  return rows as { id: string; status: RideStatus; passenger_id: string }[];
+}
+
+async function advancePool(
+  db: Db,
+  driverId: string,
+  to: 'DRIVER_ARRIVED' | 'STARTED',
+  rideFrom: RideStatus,
+  eventType: string,
+  timestampColumn: 'arrived_at' | 'started_at',
+): Promise<PoolView> {
+  const pool = await lockActivePool(db, driverId);
+  assertPoolTransition(pool.status, to); // OPEN -> DRIVER_ARRIVED -> STARTED only, in order
+
+  const rides = await lockPoolRides(db, pool.id, [rideFrom]);
+  for (const r of rides) assertRideTransition(r.status, to);
+  await db.query(
+    `UPDATE ride_requests SET status = $2, ${timestampColumn} = now() WHERE pool_id = $1 AND status = $3`,
+    [pool.id, to, rideFrom],
+  );
+  await db.query(`UPDATE pools SET status = $2, ${timestampColumn} = now() WHERE id = $1`, [pool.id, to]);
+
+  await recordEvent(db, { poolId: pool.id, actorId: driverId, type: `POOL_${eventType}`, from: pool.status, to });
+  for (const r of rides) {
+    await recordEvent(db, { rideId: r.id, poolId: pool.id, actorId: driverId, type: `RIDE_${eventType}`, from: r.status, to });
+  }
+  return (await getPoolView(db, pool.id))!;
+}
+
+/**
+ * Driver reached the pickup. Boarding closes here: from now on nobody can join or cancel,
+ * so pool membership, and therefore every fare, is final.
+ */
+export function markArrived(driverId: string): Promise<PoolView> {
+  return withTransaction((db) => advancePool(db, driverId, 'DRIVER_ARRIVED', 'MATCHED', 'DRIVER_ARRIVED', 'arrived_at'));
+}
+
+export function startTrip(driverId: string): Promise<PoolView> {
+  return withTransaction((db) => advancePool(db, driverId, 'STARTED', 'DRIVER_ARRIVED', 'STARTED', 'started_at'));
+}
+
+/**
+ * Drops one passenger off. Records the payment, and completes the pool once the last
+ * passenger is done. TeslaPay is a simulated wallet debit; if the wallet cannot cover it
+ * (it should, since it covered the solo fare at request time) the fare falls back to cash
+ * instead of leaving the trip stuck.
+ */
+export async function completePassenger(driverId: string, rideId: string): Promise<PoolView> {
+  return withTransaction(async (db) => {
+    const pool = await lockActivePool(db, driverId);
+    const ride = await lockRide(db, rideId);
+    if (ride.pool_id !== pool.id) throw notFound('That ride is not in your pool');
+    if (pool.status !== 'STARTED') throw conflict('INVALID_TRANSITION', `The trip has not started (pool is ${pool.status})`);
+    assertRideTransition(ride.status as RideStatus, 'COMPLETED');
+
+    await db.query("UPDATE ride_requests SET status = 'COMPLETED', completed_at = now() WHERE id = $1", [ride.id]);
+    await db.query('UPDATE pools SET occupied_seats = occupied_seats - $2 WHERE id = $1', [pool.id, ride.seats]);
+    await recordEvent(db, { rideId: ride.id, poolId: pool.id, actorId: driverId, type: 'RIDE_COMPLETED', from: 'STARTED', to: 'COMPLETED' });
+
+    let method: 'CASH' | 'TESLAPAY' = ride.payment_method;
+    if (method === 'TESLAPAY') {
+      const debit = await db.query(
+        'UPDATE users SET wallet_paisa = wallet_paisa - $2 WHERE id = $1 AND wallet_paisa >= $2',
+        [ride.passenger_id, ride.total_fare_paisa],
+      );
+      if (debit.rowCount === 0) {
+        method = 'CASH';
+        await recordEvent(db, { rideId: ride.id, poolId: pool.id, actorId: driverId, type: 'PAYMENT_FELL_BACK_TO_CASH', metadata: { amountPaisa: ride.total_fare_paisa } });
+      }
+    }
+    await db.query('INSERT INTO payments (ride_request_id, method, amount_paisa) VALUES ($1, $2, $3)', [ride.id, method, ride.total_fare_paisa]);
+    await recordEvent(db, { rideId: ride.id, poolId: pool.id, actorId: driverId, type: 'PAYMENT_RECORDED', metadata: { method, amountPaisa: ride.total_fare_paisa } });
+
+    const { rows } = await db.query("SELECT count(*)::int AS n FROM ride_requests WHERE pool_id = $1 AND status = 'STARTED'", [pool.id]);
+    if (rows[0].n === 0) {
+      await db.query("UPDATE pools SET status = 'COMPLETED', completed_at = now() WHERE id = $1", [pool.id]);
+      await recordEvent(db, { poolId: pool.id, actorId: driverId, type: 'POOL_COMPLETED', from: 'STARTED', to: 'COMPLETED' });
+    }
+    return (await getPoolView(db, pool.id))!;
+  });
+}
+
+/**
+ * Driver abandons the pool before the trip starts. Nobody is cancelled: every passenger goes
+ * back to REQUESTED at their solo fare so another Tesla can pick them up.
+ */
+export async function cancelPool(driverId: string): Promise<{ requeuedRides: number }> {
+  return withTransaction(async (db) => {
+    const pool = await lockActivePool(db, driverId);
+    assertPoolTransition(pool.status, 'CANCELLED'); // rejects STARTED
+
+    const rides = await lockPoolRides(db, pool.id, ['MATCHED', 'DRIVER_ARRIVED']);
+    for (const r of rides) {
+      const locked = await lockRide(db, r.id);
+      assertRideTransition(locked.status as RideStatus, 'REQUESTED');
+      // The last passenger out also cancels the (now empty) pool; see leavePool.
+      await leavePool(db, pool, locked, driverId, 'REQUESTED');
+    }
+    return { requeuedRides: rides.length };
+  });
+}
+
+export async function history(driverId: string): Promise<{ pools: PoolView[]; completedTrips: number; earningsPaisa: number }> {
+  const v = await getVehicle(dbPool, driverId);
+  const { rows } = await query(
+    "SELECT id FROM pools WHERE vehicle_id = $1 AND status IN ('COMPLETED', 'CANCELLED') ORDER BY created_at DESC LIMIT 20",
+    [v.id],
+  );
+  const pools = (await Promise.all(rows.map((r) => getPoolView(dbPool, r.id)))).filter((p): p is PoolView => p !== null);
+  const earned = await query(
+    `SELECT count(*)::int AS trips, COALESCE(sum(py.amount_paisa), 0)::int AS total
+       FROM payments py JOIN ride_requests r ON r.id = py.ride_request_id
+       JOIN pools p ON p.id = r.pool_id WHERE p.vehicle_id = $1`,
+    [v.id],
+  );
+  return { pools, completedTrips: earned.rows[0].trips, earningsPaisa: earned.rows[0].total };
 }
