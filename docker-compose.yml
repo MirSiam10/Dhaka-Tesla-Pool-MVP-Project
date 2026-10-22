@@ -1,0 +1,43 @@
+# One command: docker compose up --build
+# Starts PostgreSQL, applies migrations, loads the demo cast and serves the API on :4000.
+name: dhaka-tesla-pool
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-tesla}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-tesla}
+      POSTGRES_DB: ${POSTGRES_DB:-dhaka_tesla_pool}
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./docker/initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  api:
+    build: ./backend
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: 4000
+      DATABASE_URL: postgres://${POSTGRES_USER:-tesla}:${POSTGRES_PASSWORD:-tesla}@db:5432/${POSTGRES_DB:-dhaka_tesla_pool}
+      # Development default so `docker compose up` works with zero setup.
+      # Set a real random value (openssl rand -hex 32) for anything public.
+      JWT_SECRET: ${JWT_SECRET:-dev-only-secret-change-before-deploying-1234}
+      SEED_ON_START: ${SEED_ON_START:-true}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    ports:
+      - "${API_PORT:-4000}:4000"
+    restart: unless-stopped
+
+volumes:
+  pgdata:
