@@ -35,6 +35,7 @@ export interface LockedRide {
   status: string;
   total_fare_paisa: number;
   pool_discount_paisa: number;
+  payment_method: 'CASH' | 'TESLAPAY';
 }
 
 export type JoinVerdict = MatchVerdict | { ok: false; reason: 'POOL_CLOSED' };
@@ -52,7 +53,7 @@ export async function lockPool(db: Db, poolId: string): Promise<PoolRow> {
 export async function lockRide(db: Db, rideId: string): Promise<LockedRide> {
   const { rows } = await db.query(
     `SELECT r.id, r.passenger_id, r.pool_id, r.pickup_zone, r.destination_zone, r.seats, r.status,
-            r.total_fare_paisa, r.pool_discount_paisa, dz.corridor AS destination_corridor
+            r.total_fare_paisa, r.pool_discount_paisa, r.payment_method, dz.corridor AS destination_corridor
        FROM ride_requests r JOIN zones dz ON dz.code = r.destination_zone
       WHERE r.id = $1 FOR UPDATE OF r`,
     [rideId],
