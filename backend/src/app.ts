@@ -7,6 +7,7 @@ import { logger } from './logger';
 import { errorHandler, notFoundHandler } from './middleware/error';
 import { authRouter } from './routes/auth';
 import { healthRouter } from './routes/health';
+import { ridesRouter } from './routes/rides';
 import { zonesRouter } from './routes/zones';
 
 export function createApp(): Express {
@@ -29,6 +30,7 @@ export function createApp(): Express {
   app.use('/health', healthRouter);
   app.use('/api/auth', authRouter);
   app.use('/api', zonesRouter);
+  app.use('/api/rides', ridesRouter);
 
   app.use(notFoundHandler);
   app.use(errorHandler);
