@@ -1,7 +1,8 @@
 import { type Db, pool, query, withTransaction } from '../db/pool';
-import { badRequest, conflict, notFound } from '../errors';
+import { AppError, badRequest, conflict, notFound } from '../errors';
 import { calculateFare } from '../fare/fare';
 import { assertRideTransition, type RideStatus } from '../pooling/lifecycle';
+import { autoJoin, leavePool, lockPool, lockRide } from '../pooling/poolService';
 import { recordEvent } from './events';
 import { getDistanceM, getZone } from './zones';
 
@@ -168,22 +169,48 @@ export async function createRide(passengerId: string, input: RideInput): Promise
       to: 'REQUESTED',
       metadata: { pickup: input.pickupZone, destination: input.destinationZone, seats: input.seats, soloFarePaisa: solo.totalFarePaisa },
     });
+
+    // If a compatible Tesla is already collecting passengers, take a seat immediately.
+    // Otherwise the ride simply waits as REQUESTED until a driver accepts it.
+    await autoJoin(db, await lockRide(db, rideId), passengerId);
     return getRideForPassenger(db, passengerId, rideId);
   });
 }
 
 export async function cancelRide(passengerId: string, rideId: string): Promise<RideView> {
-  return withTransaction(async (db) => {
-    const { rows } = await db.query(
-      'SELECT id, status FROM ride_requests WHERE id = $1 AND passenger_id = $2 FOR UPDATE',
-      [rideId, passengerId],
-    );
-    if (!rows[0]) throw notFound('Ride not found');
-    const from = rows[0].status as RideStatus;
-    assertRideTransition(from, 'CANCELLED');
+  // A driver can accept the ride between our unlocked peek and our locks (see below). The
+  // ride then has a pool we did not lock first, so we start over, now locking that pool.
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await cancelRideOnce(passengerId, rideId);
+    } catch (err) {
+      if (attempt < 3 && err instanceof AppError && err.code === 'RIDE_CHANGED') continue;
+      throw err;
+    }
+  }
+}
 
-    await db.query("UPDATE ride_requests SET status = 'CANCELLED', cancelled_at = now() WHERE id = $1", [rideId]);
-    await recordEvent(db, { rideId, actorId: passengerId, type: 'RIDE_CANCELLED', from, to: 'CANCELLED' });
+async function cancelRideOnce(passengerId: string, rideId: string): Promise<RideView> {
+  return withTransaction(async (db) => {
+    // Peek (no lock) to learn which pool to lock first: lock order is always pool, then ride.
+    const peek = await db.query('SELECT pool_id FROM ride_requests WHERE id = $1 AND passenger_id = $2', [rideId, passengerId]);
+    if (!peek.rows[0]) throw notFound('Ride not found');
+    const pool = peek.rows[0].pool_id ? await lockPool(db, peek.rows[0].pool_id) : null;
+
+    const ride = await lockRide(db, rideId);
+    if (ride.pool_id !== (pool?.id ?? null)) {
+      throw conflict('RIDE_CHANGED', 'The ride changed while cancelling. Please try again.');
+    }
+    // Only REQUESTED and MATCHED can be cancelled. After the driver arrives the pool is
+    // closed and fares are final, so DRIVER_ARRIVED, STARTED and finished rides are rejected here.
+    assertRideTransition(ride.status as RideStatus, 'CANCELLED');
+
+    if (pool) {
+      await leavePool(db, pool, ride, passengerId, 'CANCELLED');
+    } else {
+      await db.query("UPDATE ride_requests SET status = 'CANCELLED', cancelled_at = now() WHERE id = $1", [rideId]);
+      await recordEvent(db, { rideId, actorId: passengerId, type: 'RIDE_CANCELLED', from: ride.status, to: 'CANCELLED' });
+    }
     return getRideForPassenger(db, passengerId, rideId);
   });
 }
