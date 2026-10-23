@@ -5,7 +5,7 @@
 ```mermaid
 flowchart LR
     B[Browser] -->|HTTPS| W["Next.js web<br/>(App Router, React)"]
-    W -->|"/api/* rewrite<br/>REST + JSON, JWT bearer"| A["Node.js API<br/>(Express + TypeScript)"]
+    W -->|"/api/* proxied by a route handler<br/>REST + JSON, JWT bearer"| A["Node.js API<br/>(Express + TypeScript)"]
     A -->|"SQL over node-postgres pool<br/>transactions + row locks"| D[("PostgreSQL 16")]
 ```
 
@@ -13,8 +13,29 @@ Three deployable units, nothing else: `web`, `api`, `db`. No Redis, queues, or
 microservices, because nothing in the MVP needs them. The "scale" section of the README
 explains when each would earn its place.
 
-The browser only ever talks to the Next.js origin. Next.js rewrites `/api/*` to the API
-service, which avoids CORS and keeps the API URL out of client bundles.
+The browser only ever talks to the Next.js origin. A Next.js route handler
+(`web/src/app/api/[...path]/route.ts`) forwards `/api/*` to the API service, which avoids
+CORS and keeps the API URL out of client bundles.
+
+**Change from the first design:** the plan was a `next.config` rewrite. Rewrites are baked
+into the build, so the same image could not point at different APIs. The route handler reads
+`API_URL` on every request instead, so one built image runs unchanged on a laptop, in
+`docker compose` and on a hosting platform.
+
+### Deployment view
+
+```mermaid
+flowchart LR
+    subgraph compose["docker compose up"]
+        direction LR
+        web["web :3000<br/>Next.js standalone"] -->|API_URL=http://api:4000| api["api :4000<br/>Express, runs migrations + seed on boot"]
+        api --> db[("db :5432<br/>postgres:16")]
+    end
+    U[Browser] -->|http://localhost:3000| web
+```
+
+Containers are non-root, have health checks, and start in dependency order: `db` healthy,
+then `api` healthy (`/health/ready` pings the database), then `web`.
 
 ## API layering
 
