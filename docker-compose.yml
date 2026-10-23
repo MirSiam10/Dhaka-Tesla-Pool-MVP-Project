@@ -1,5 +1,6 @@
 # One command: docker compose up --build
-# Starts PostgreSQL, applies migrations, loads the demo cast and serves the API on :4000.
+# Starts PostgreSQL, applies migrations, loads the demo cast, serves the API on :4000
+# and the web app on :3000. Open http://localhost:3000
 name: dhaka-tesla-pool
 
 services:
@@ -37,6 +38,18 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-info}
     ports:
       - "${API_PORT:-4000}:4000"
+    restart: unless-stopped
+
+  web:
+    build: ./web
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      # Server-side address of the API on the compose network. The browser never sees it.
+      API_URL: http://api:4000
+    ports:
+      - "${WEB_PORT:-3000}:3000"
     restart: unless-stopped
 
 volumes:
