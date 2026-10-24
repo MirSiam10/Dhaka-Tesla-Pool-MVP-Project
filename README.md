@@ -2,9 +2,6 @@
 
 > Share a seat. Split the fare. Survive Dhaka traffic.
 
-**Demo video (6 min):** `TODO: paste Loom link before submitting`
-**Live deployment:** `TODO: paste URL after following docs/deployment.md` (otherwise `docker compose up` below is the reproducible route)
-
 ## Summary
 
 Dhaka Tesla Pool is a ride-pooling MVP for three-seat battery rickshaws ("Teslas"). A passenger
