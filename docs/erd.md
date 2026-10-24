@@ -112,7 +112,7 @@ erDiagram
   passenger.
 - `total_fare_paisa = base_fare_paisa + distance_charge_paisa - pool_discount_paisa`.
 - `pickup_zone <> destination_zone`, `seats >= 1`.
-- `REQUESTED` rides have no pool; `MATCHED`, `DRIVER_ARRIVED` and `STARTED` rides must have one.
+- `REQUESTED` rides have no pool; `MATCHED`, `DRIVER_ARRIVED`, `STARTED` and `COMPLETED` rides must have one (CHECK constraints). A `CANCELLED` ride keeps its `pool_id` as a record of where it was.
 
 ## Indexes
 
