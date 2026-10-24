@@ -11,6 +11,8 @@ const schema = z.object({
   LOG_LEVEL: z.string().default('info'),
   DB_POOL_MAX: z.coerce.number().int().positive().default(10),
   CORS_ORIGIN: z.string().optional(),
+  // Load the demo cast (Jashim, Bullet, Nusrat, Rafiq, Shirin) on boot. Idempotent.
+  SEED_ON_START: z.enum(['true', 'false']).default('false').transform((v) => v === 'true'),
 });
 
 const parsed = schema.safeParse(process.env);
